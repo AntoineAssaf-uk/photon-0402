@@ -1,307 +1,197 @@
 /*
-Photon Feeder Firmware
-Part of the LumenPnP Project
-MPL v2
-2025
-*/
+ * Photon minimal feeder test-bed firmware
+ * Section 7 - stripped starting point
+ *
+ * This firmware intentionally removes:
+ * - Photon feeder protocol
+ * - RS485 packet layer
+ * - FeederFloor / OneWire address logic
+ * - motor feed algorithms
+ * - peeler logic
+ *
+ * It keeps:
+ * - pin definitions
+ * - UART test interface
+ * - LED heartbeat
+ * - optional software jump to STM32 system bootloader
+ */
+
+#include <Arduino.h>
 
 #include "define.h"
-
-#ifdef UNIT_TEST
-  #include <ArduinoFake.h>
-#else
-  #include <Arduino.h>
-  #include <HardwareSerial.h>
-  #include <OneWire.h>
-  #include <ArduinoUniqueID.h>
-  #include <rs485/rs485bus.hpp>
-#endif // UNIT_TEST
-
-#ifndef MOTOR_DEPS
-#define MOTOR_DEPS
-
-#include <RotaryEncoder.h>
-
-#endif
-
-#include "FeederFloor.h"
-#include "PhotonFeeder.h"
-#include "PhotonFeederProtocol.h"
-#include "PhotonNetworkLayer.h"
-
-#include <rs485/rs485bus.hpp>
-#include <rs485/bus_adapters/hardware_serial.h>
-#include <rs485/filters/filter_by_value.h>
-#include <rs485/protocols/photon.h>
-#include <rs485/packetizer.h>
-
 #include "bootloader.h"
 
-#define BAUD_RATE 57600
+#ifndef VERSION_STRING
+#define VERSION_STRING "section7-minimal-unknown"
+#endif
 
-//-----
-// Global Variables
-//-----
+#define TEST_BAUD_RATE 115200
 
-#ifdef UNIT_TEST
-StreamFake ser();
-#else
-HardwareSerial ser(PA10, PA9);
-#endif // ARDUINO
+// Original Photon code used HardwareSerial(PA10, PA9).
+// In STM32 Arduino this is RX, TX.
+HardwareSerial TestSerial(PA10, PA9);
 
-// EEPROM
-OneWire oneWire(ONE_WIRE);
-FeederFloor feederFloor(&oneWire);
+static uint32_t heartbeatLastMs = 0;
+static bool heartbeatState = false;
 
-// RS485
-HardwareSerialBusIO busIO(&ser);
-RS485Bus<RS485_BUS_BUFFER_SIZE> bus(busIO, _RE, DE);
-PhotonProtocol photon_protocol;
-Packetizer packetizer(bus, photon_protocol);
-FilterByValue addressFilter(0);
+static char rxLine[64];
+static uint8_t rxIndex = 0;
 
-// Encoder
-RotaryEncoder encoder(DRIVE_ENC_A, DRIVE_ENC_B, RotaryEncoder::LatchMode::TWO03);
-
-// Flags
-bool drive_mode = false;
-bool driving = false;
-bool driving_direction = false;
-
-// Feeder Class Instances
-PhotonFeeder *feeder;
-PhotonFeederProtocol *protocol;
-PhotonNetworkLayer *network;
-
-//-------
-//FUNCTIONS
-//-------
-
-void checkPosition()
-{
-  encoder.tick(); // just call tick() to check the state.
+static void setRgb(bool r, bool g, bool b) {
+    digitalWrite(LED_R, r ? HIGH : LOW);
+    digitalWrite(LED_G, g ? HIGH : LOW);
+    digitalWrite(LED_B, b ? HIGH : LOW);
 }
 
-//-------
-//SETUP
-//-------
+static void safeMotorOff() {
+    // First test-bed rule:
+    // do not move anything until each motor function is tested explicitly.
+    digitalWrite(DRIVE1, LOW);
+    digitalWrite(DRIVE2, LOW);
+    digitalWrite(PEEL1, LOW);
+    digitalWrite(PEEL2, LOW);
+
+    // Conservative default: keep motor enable low.
+    // We will confirm actual enable polarity later before motor tests.
+    digitalWrite(MOTOR_ENABLE, LOW);
+}
+
+static void printHelp() {
+    TestSerial.println();
+    TestSerial.println("PHOTON_MINIMAL_TESTBED");
+    TestSerial.print("VERSION=");
+    TestSerial.println(VERSION_STRING);
+    TestSerial.println();
+    TestSerial.println("Commands:");
+    TestSerial.println("  ?       help");
+    TestSerial.println("  v       version");
+    TestSerial.println("  led r   red LED");
+    TestSerial.println("  led g   green LED");
+    TestSerial.println("  led b   blue LED");
+    TestSerial.println("  led off LEDs off");
+    TestSerial.println("  boot    jump to STM32 system bootloader");
+    TestSerial.println();
+}
+
+static bool equalsCommand(const char *a, const char *b) {
+    return strcmp(a, b) == 0;
+}
+
+static void handleCommand(char *cmd) {
+    // Trim leading spaces.
+    while (*cmd == ' ' || *cmd == '\t') {
+        cmd++;
+    }
+
+    // Trim trailing CR/LF/spaces.
+    size_t len = strlen(cmd);
+    while (len > 0 &&
+           (cmd[len - 1] == '\r' ||
+            cmd[len - 1] == '\n' ||
+            cmd[len - 1] == ' ' ||
+            cmd[len - 1] == '\t')) {
+        cmd[len - 1] = '\0';
+        len--;
+    }
+
+    if (equalsCommand(cmd, "?")) {
+        printHelp();
+    }
+    else if (equalsCommand(cmd, "v")) {
+        TestSerial.print("VERSION=");
+        TestSerial.println(VERSION_STRING);
+    }
+    else if (equalsCommand(cmd, "led r")) {
+        setRgb(true, false, false);
+        TestSerial.println("OK LED RED");
+    }
+    else if (equalsCommand(cmd, "led g")) {
+        setRgb(false, true, false);
+        TestSerial.println("OK LED GREEN");
+    }
+    else if (equalsCommand(cmd, "led b")) {
+        setRgb(false, false, true);
+        TestSerial.println("OK LED BLUE");
+    }
+    else if (equalsCommand(cmd, "led off")) {
+        setRgb(false, false, false);
+        TestSerial.println("OK LED OFF");
+    }
+    else if (equalsCommand(cmd, "boot")) {
+        TestSerial.println("OK BOOTLOADER");
+        TestSerial.flush();
+        delay(100);
+        reboot_into_bootloader();
+    }
+    else if (len == 0) {
+        // Ignore empty line.
+    }
+    else {
+        TestSerial.print("ERR UNKNOWN COMMAND: ");
+        TestSerial.println(cmd);
+    }
+}
+
+static void pollSerial() {
+    while (TestSerial.available() > 0) {
+        char c = (char) TestSerial.read();
+
+        if (c == '\n' || c == '\r') {
+            rxLine[rxIndex] = '\0';
+            handleCommand(rxLine);
+            rxIndex = 0;
+        }
+        else {
+            if (rxIndex < sizeof(rxLine) - 1) {
+                rxLine[rxIndex++] = c;
+            }
+            else {
+                rxIndex = 0;
+                TestSerial.println("ERR LINE TOO LONG");
+            }
+        }
+    }
+}
+
+static void heartbeat() {
+    uint32_t now = millis();
+
+    if (now - heartbeatLastMs >= 500) {
+        heartbeatLastMs = now;
+        heartbeatState = !heartbeatState;
+
+        // Blue heartbeat while idle.
+        digitalWrite(LED_B, heartbeatState ? HIGH : LOW);
+    }
+}
 
 void setup() {
-  pinMode(LED_R, OUTPUT);
-  pinMode(LED_G, OUTPUT);
-  pinMode(LED_B, OUTPUT);
-  feeder->set_rgb(false, false, false);
+    pinMode(LED_R, OUTPUT);
+    pinMode(LED_G, OUTPUT);
+    pinMode(LED_B, OUTPUT);
 
-  pinMode(SW1, INPUT_PULLUP);
-  pinMode(SW2, INPUT_PULLUP);
-  pinMode(MOTOR_ENABLE, OUTPUT);
-  digitalWrite(MOTOR_ENABLE, HIGH);
+    pinMode(SW1, INPUT_PULLUP);
+    pinMode(SW2, INPUT_PULLUP);
 
-  // Setup Feeder
-  feeder = new PhotonFeeder(DRIVE1, DRIVE2, PEEL1, PEEL2, LED_R, LED_G, LED_B, &encoder);
-  network = new PhotonNetworkLayer(&bus, &packetizer, &addressFilter, &feederFloor);
-  protocol = new PhotonFeederProtocol(feeder, &feederFloor, network, UniqueID, UniqueIDsize);
+    pinMode(MOTOR_ENABLE, OUTPUT);
+    pinMode(DRIVE1, OUTPUT);
+    pinMode(DRIVE2, OUTPUT);
+    pinMode(PEEL1, OUTPUT);
+    pinMode(PEEL2, OUTPUT);
 
-  byte addr = feederFloor.read_floor_address();
+    safeMotorOff();
 
-  if(addr == 0xFF){ // not detected, turn red
-    feeder->set_rgb(true, false, false);
-  }
-  else if (addr == 0x00){ //not programmed, turn blue
-    feeder->set_rgb(false, false, true);
-  }
+    setRgb(false, true, false);
+    delay(200);
+    setRgb(false, false, false);
 
-  //Starting rs-485 serial
-  ser.begin(BAUD_RATE);
+    TestSerial.begin(TEST_BAUD_RATE);
+    delay(100);
 
-  // attach interrupts for encoder pins
-  attachInterrupt(digitalPinToInterrupt(DRIVE_ENC_A), checkPosition, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(DRIVE_ENC_B), checkPosition, CHANGE);
-
-  feeder->resetEncoderPosition(0);
-  feeder->setMmPosition(0);
-
+    printHelp();
 }
 
-void lifetime(){
-  // lifetime testing loop
-  uint32_t counter = millis();
-  uint32_t interval = 3000;
-  while(true){
-    if(millis() > counter + interval){
-      //reset counter to millis()
-      counter = millis();
-      //move
-      feeder->feedDistance(40, true);
-      feeder->resetEncoderPosition(0);
-      feeder->setMmPosition(0);
-    }
-  }
-}
-
-void showVersion(){
-
-  feeder->showVersion();
-
-}
-
-void topShortPress(){
-  //turn led white for movement
-  feeder->set_rgb(true, true, true);
-  // move forward 2mm
-  feeder->feedDistance(20, true);
-}
-
-void bottomShortPress(){
-  //turn led white for movement
-  feeder->set_rgb(true, true, true);
-  // move forward 2mm
-  feeder->feedDistance(20, false);
-
-  if (feeder->getMoveResult() == PhotonFeeder::FeedResult::SUCCESS){
-    feeder->set_rgb(false, false, false);
-  }
-  else{
-    feeder->set_rgb(true, false, false);
-  }
-}
-
-void topLongPress(){
-  //we've got a long top press, lets drive forward, tape or film depending on drive_mode
-  if(drive_mode){
-    feeder->peel(true);
-  }
-  else{
-    //resetting first feed, since we could now have a new tape type
-    feeder->_first_feed_since_load = true;
-    feeder->drive(true);
-  }
-      // set flag for concurrency to know driving state
-  driving = true;
-  driving_direction = true;
-}
-
-void bottomLongPress(){
-  // moving in reverse, motor selected by drive_mode
-  if(drive_mode){
-    feeder->peel(false);
-  }
-  else{
-    //resetting first feed, since we could now have a new tape type
-    feeder->_first_feed_since_load = true;
-    feeder->drive(false);
-  }
-    // set flag for concurrency to know driving state
-  driving = true;
-  driving_direction = false;
-
-}
-
-void bothLongPress(){
-  //both are pressed, switching if we are driving tape or film
-
-  if(drive_mode){
-    feeder->set_rgb(false, false, true);
-    drive_mode = false;
-  }
-  else{
-    feeder->set_rgb(true, true, false);
-    drive_mode = true;
-  }
-
-  //if both are held for a long time, we show current version id
-  uint32_t timerStart = millis();
-
-  bool alreadyFlashed = false;
-
-  while( (!digitalRead(SW1) || !digitalRead(SW2))){
-    //do nothing while waiting for debounce
-    if((timerStart + 2000 < millis()) && !alreadyFlashed){
-      feeder->set_rgb(false, false, false);
-      showVersion();
-      alreadyFlashed = true;
-    }
-
-    // if held for a really long time, reboot into the bootloader
-    if((timerStart + 4000 < millis())){
-      for (int n = 0; n < 10; n++) {
-        feeder->set_rgb(!(n % 2), false, n % 2);
-        delay(100);
-      }
-    }
-    if((timerStart + 6000 < millis())){
-      feeder->set_rgb(true, false, true);
-      reboot_into_bootloader();
-    }
-  }
-
-  //delay for debounce
-  delay(50);
-  feeder->set_rgb(false, false, false);
-}
-
-inline void checkButtons() {
-  if(!driving){
-    // Checking bottom button
-    if(!digitalRead(SW1)){
-      delay(LONG_PRESS_DELAY);
-      // if bottom long press
-      if(!digitalRead(SW1)){
-        // if both long press
-        if(!digitalRead(SW2)){
-          bothLongPress();
-        }
-        // if just bottom long press
-        else{
-          bottomLongPress();
-        }
-      }
-      // if bottom short press
-      else{
-        bottomShortPress();
-      }
-    }
-    // Checking top button
-    if(!digitalRead(SW2)){
-      delay(LONG_PRESS_DELAY);
-      // if top long press
-      if(!digitalRead(SW2)){
-        // if both long press
-        if(!digitalRead(SW1)){
-          bothLongPress();
-        }
-        // if just top long press
-        else{
-          topLongPress();
-        }
-      }
-      // if top short press
-      else{
-        topShortPress();
-      }
-    }
-  }
-  else{
-    if((driving_direction && digitalRead(SW2)) || (!driving_direction && digitalRead(SW1))){
-      //stop all motors
-      feeder->halt();
-      //reset encoder and mm position
-      feeder->resetEncoderPosition(0);
-      feeder->setMmPosition(0);
-      driving = false;
-      delay(5);
-    }
-  }
-}
-
-inline void checkForRS485Packet() {
-  protocol->tick();
-}
-
-//------
-//  MAIN CONTROL LOOP
-//------
 void loop() {
-  checkButtons();
-  checkForRS485Packet();
+    heartbeat();
+    pollSerial();
 }
