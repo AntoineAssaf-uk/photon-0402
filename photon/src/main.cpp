@@ -37,13 +37,15 @@ static bool heartbeatState = false;
 static char rxLine[64];
 static uint8_t rxIndex = 0;
 
-static void setRgb(bool r, bool g, bool b) {
-    digitalWrite(LED_R, r ? HIGH : LOW);
-    digitalWrite(LED_G, g ? HIGH : LOW);
-    digitalWrite(LED_B, b ? HIGH : LOW);
+static void setRgb(bool r, bool g, bool b)
+{
+    digitalWrite(LED_R, r ? LOW : HIGH);
+    digitalWrite(LED_G, g ? LOW : HIGH);
+    digitalWrite(LED_B, b ? LOW : HIGH);
 }
 
-static void safeMotorOff() {
+static void safeMotorOff()
+{
     // First test-bed rule:
     // do not move anything until each motor function is tested explicitly.
     digitalWrite(DRIVE1, LOW);
@@ -56,7 +58,8 @@ static void safeMotorOff() {
     digitalWrite(MOTOR_ENABLE, LOW);
 }
 
-static void printHelp() {
+static void printHelp()
+{
     TestSerial.println();
     TestSerial.println("PHOTON_MINIMAL_TESTBED");
     TestSerial.print("VERSION=");
@@ -73,13 +76,16 @@ static void printHelp() {
     TestSerial.println();
 }
 
-static bool equalsCommand(const char *a, const char *b) {
+static bool equalsCommand(const char *a, const char *b)
+{
     return strcmp(a, b) == 0;
 }
 
-static void handleCommand(char *cmd) {
+static void handleCommand(char *cmd)
+{
     // Trim leading spaces.
-    while (*cmd == ' ' || *cmd == '\t') {
+    while (*cmd == ' ' || *cmd == '\t')
+    {
         cmd++;
     }
 
@@ -89,63 +95,79 @@ static void handleCommand(char *cmd) {
            (cmd[len - 1] == '\r' ||
             cmd[len - 1] == '\n' ||
             cmd[len - 1] == ' ' ||
-            cmd[len - 1] == '\t')) {
+            cmd[len - 1] == '\t'))
+    {
         cmd[len - 1] = '\0';
         len--;
     }
 
-    if (equalsCommand(cmd, "?")) {
+    if (equalsCommand(cmd, "?"))
+    {
         printHelp();
     }
-    else if (equalsCommand(cmd, "v")) {
+    else if (equalsCommand(cmd, "v"))
+    {
         TestSerial.print("VERSION=");
         TestSerial.println(VERSION_STRING);
     }
-    else if (equalsCommand(cmd, "led r")) {
+    else if (equalsCommand(cmd, "led r"))
+    {
         setRgb(true, false, false);
         TestSerial.println("OK LED RED");
     }
-    else if (equalsCommand(cmd, "led g")) {
+    else if (equalsCommand(cmd, "led g"))
+    {
         setRgb(false, true, false);
         TestSerial.println("OK LED GREEN");
     }
-    else if (equalsCommand(cmd, "led b")) {
+    else if (equalsCommand(cmd, "led b"))
+    {
         setRgb(false, false, true);
         TestSerial.println("OK LED BLUE");
     }
-    else if (equalsCommand(cmd, "led off")) {
+    else if (equalsCommand(cmd, "led off"))
+    {
         setRgb(false, false, false);
         TestSerial.println("OK LED OFF");
     }
-    else if (equalsCommand(cmd, "boot")) {
+    else if (equalsCommand(cmd, "boot"))
+    {
         TestSerial.println("OK BOOTLOADER");
         TestSerial.flush();
         delay(100);
         reboot_into_bootloader();
     }
-    else if (len == 0) {
+    else if (len == 0)
+    {
         // Ignore empty line.
     }
-    else {
+    else
+    {
         TestSerial.print("ERR UNKNOWN COMMAND: ");
         TestSerial.println(cmd);
     }
 }
 
-static void pollSerial() {
-    while (TestSerial.available() > 0) {
-        char c = (char) TestSerial.read();
+static void pollSerial()
+{
+    while (TestSerial.available() > 0)
+    {
+        char c = (char)TestSerial.read();
 
-        if (c == '\n' || c == '\r') {
+        if (c == '\n' || c == '\r')
+        {
             rxLine[rxIndex] = '\0';
             handleCommand(rxLine);
             rxIndex = 0;
         }
-        else {
-            if (rxIndex < sizeof(rxLine) - 1) {
+        else
+        {
+            if (rxIndex < sizeof(rxLine) - 1)
+            {
                 rxLine[rxIndex++] = c;
             }
-            else {
+            else
+            {
                 rxIndex = 0;
                 TestSerial.println("ERR LINE TOO LONG");
             }
@@ -153,10 +175,12 @@ static void pollSerial() {
     }
 }
 
-static void heartbeat() {
+static void heartbeat()
+{
     uint32_t now = millis();
 
-    if (now - heartbeatLastMs >= 500) {
+    if (now - heartbeatLastMs >= 500)
+    {
         heartbeatLastMs = now;
         heartbeatState = !heartbeatState;
 
@@ -165,7 +189,11 @@ static void heartbeat() {
     }
 }
 
-void setup() {
+void setup()
+{
+    
+     pinMode(DEBUG_PIN, OUTPUT);
+
     pinMode(LED_R, OUTPUT);
     pinMode(LED_G, OUTPUT);
     pinMode(LED_B, OUTPUT);
@@ -191,7 +219,12 @@ void setup() {
     printHelp();
 }
 
-void loop() {
+void loop()
+{
     heartbeat();
     pollSerial();
+
+    digitalWrite(MOTOR_ENABLE, 1);
+    digitalWrite(DRIVE1, 1);
+    digitalWrite(DRIVE2, 0);
 }
